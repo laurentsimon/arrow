@@ -17,14 +17,17 @@
 package main
 
 import (
+	"bytes"
+	"encoding/binary"
 	"fmt"
 	"log"
 	"os"
 
 	//"github.com/apache/arrow/go/v17/parquet"
+
+	"github.com/apache/arrow/go/v17/parquet"
 	"github.com/apache/arrow/go/v17/parquet/cmd/parquet_test/buffer"
 	"github.com/apache/arrow/go/v17/parquet/file"
-	"github.com/apache/arrow/go/v17/parquet/metadata"
 	"github.com/apache/arrow/go/v17/parquet/schema"
 )
 
@@ -98,47 +101,126 @@ func main() {
 		rowGroupMeta := rgr.MetaData()
 		fmt.Println("--- Total Bytes:", rowGroupMeta.TotalByteSize(), " ---")
 		fmt.Println("--- Rows:", rgr.NumRows(), " ---")
-
-		for _, c := range selectedColumns {
-			chunkMeta, err := rowGroupMeta.ColumnChunk(c)
-			if err != nil {
-				log.Fatal(err)
-			}
-
-			fmt.Println("Column", c)
-			if set, _ := chunkMeta.StatsSet(); set {
-				stats, err := chunkMeta.Statistics()
+		/*
+			for _, c := range selectedColumns {
+				chunkMeta, err := rowGroupMeta.ColumnChunk(c)
 				if err != nil {
 					log.Fatal(err)
 				}
-				fmt.Printf(" Values: %d", chunkMeta.NumValues())
-				if stats.HasMinMax() {
-					fmt.Printf(", Min: %v, Max: %v",
-						metadata.GetStatValue(stats.Type(), stats.EncodeMin()),
-						metadata.GetStatValue(stats.Type(), stats.EncodeMax()))
+
+				fmt.Println("Column", c)
+				if set, _ := chunkMeta.StatsSet(); set {
+					stats, err := chunkMeta.Statistics()
+					if err != nil {
+						log.Fatal(err)
+					}
+					fmt.Printf(" Values: %d", chunkMeta.NumValues())
+					if stats.HasMinMax() {
+						fmt.Printf(", Min: %v, Max: %v",
+							metadata.GetStatValue(stats.Type(), stats.EncodeMin()),
+							metadata.GetStatValue(stats.Type(), stats.EncodeMax()))
+					}
+					if stats.HasNullCount() {
+						fmt.Printf(", Null Values: %d", stats.NullCount())
+					}
+					if stats.HasDistinctCount() {
+						fmt.Printf(", Distinct Values: %d", stats.DistinctCount())
+					}
+					fmt.Println()
+				} else {
+					fmt.Println(" Values:", chunkMeta.NumValues(), "Statistics Not Set")
 				}
-				if stats.HasNullCount() {
-					fmt.Printf(", Null Values: %d", stats.NullCount())
-				}
-				if stats.HasDistinctCount() {
-					fmt.Printf(", Distinct Values: %d", stats.DistinctCount())
+
+				fmt.Print(" Compression: ", chunkMeta.Compression())
+				fmt.Print(", Encodings:")
+				for _, enc := range chunkMeta.Encodings() {
+					fmt.Print(" ", enc)
 				}
 				fmt.Println()
-			} else {
-				fmt.Println(" Values:", chunkMeta.NumValues(), "Statistics Not Set")
+				fmt.Print(" Uncompressed Size: ", chunkMeta.TotalUncompressedSize())
+				fmt.Println(", Compressed Size:", chunkMeta.TotalCompressedSize())
 			}
+		*/
+		fmt.Println("--- Values ---")
+		fmt.Fprint(os.Stderr, "[")
 
-			fmt.Print(" Compression: ", chunkMeta.Compression())
-			fmt.Print(", Encodings:")
-			for _, enc := range chunkMeta.Encodings() {
-				fmt.Print(" ", enc)
+		scanners := make([]*Dumper, len(selectedColumns))
+		fields := make([]string, len(selectedColumns))
+		for idx, c := range selectedColumns {
+			col, err := rgr.Column(c)
+			if err != nil {
+				log.Fatalf("unable to fetch column=%d err=%s", c, err)
 			}
-			fmt.Println()
-			fmt.Print(" Uncompressed Size: ", chunkMeta.TotalUncompressedSize())
-			fmt.Println(", Compressed Size:", chunkMeta.TotalCompressedSize())
+			scanners[idx] = createDumper(col)
+			fields[idx] = col.Descriptor().Path()
 		}
+
+		var line string
+		for {
+			if line == "" {
+				line = "\n  {"
+			} else {
+				line = ",\n  {"
+			}
+
+			data := false
+			first := true
+			for idx, s := range scanners {
+				if val, ok := s.Next(); ok {
+					if !data {
+						fmt.Fprint(os.Stderr, line)
+					}
+					data = true
+					if val == nil {
+						continue
+					}
+					if !first {
+						fmt.Fprint(os.Stderr, ",")
+					}
+					first = false
+					// switch val.(type) {
+					// case bool, int32, int64, float32, float64:
+					// default:
+					// 	val = s.FormatValue(val, 0)
+					// }
+					// fmt.Fprintf(os.Stderr, "hey: %q %T", fields[idx], val)
+					// jsonVal, err := json.Marshal(val)
+					// if err != nil {
+					// 	fmt.Fprintf(os.Stderr, "error: marshalling json for %+v, %s\n", val, err)
+					// 	os.Exit(1)
+					// }
+					// fmt.Fprintf(os.Stderr, "\n    %q: %s", fields[idx], jsonVal)
+					var buf bytes.Buffer
+					switch v := val.(type) {
+					default:
+						panic(fmt.Sprintf("unknown type %T", v))
+					case bool, int32, int64, float32, float64:
+						err := binary.Write(&buf, binary.BigEndian, v)
+						if err != nil {
+							panic(err)
+						}
+					case parquet.ByteArray:
+						buf.Write(v.Bytes())
+					}
+					fmt.Fprintf(os.Stderr, "\n    %q(%T): %d %v", fields[idx], val, buf.Len(), buf.Bytes())
+					f, err := os.Create("test")
+					if err != nil {
+						panic(err)
+					}
+					defer f.Close()
+					_, err = f.Write(buf.Bytes())
+					if err != nil {
+						panic(err)
+					}
+					panic("end")
+				}
+			}
+			if !data {
+				break
+			}
+			fmt.Fprint(os.Stderr, "\n  }")
+		}
+
+		fmt.Fprintln(os.Stderr, "\n]")
 	}
-
-	fmt.Println("--- Values ---")
-
 }
