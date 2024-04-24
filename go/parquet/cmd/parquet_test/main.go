@@ -90,7 +90,7 @@ func main() {
 		}
 		fmt.Print(")\n")
 	}
-	return
+
 	for r := 0; r < prd.NumRowGroups(); r++ {
 		fmt.Println("--- Row Group:", r, " ---")
 
